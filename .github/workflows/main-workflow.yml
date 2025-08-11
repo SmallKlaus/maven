@@ -1,0 +1,99 @@
+name: 'SonarCloud Historical Issue Analysis'
+
+on:
+  workflow_dispatch:
+
+jobs:
+  # This job reads the JSON file and prepares the list of issues for the next job
+  setup-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: 'Checkout repository'
+        uses: actions/checkout@v4
+
+      - name: 'Install jq'
+        run: sudo apt-get install -y jq
+
+      - name: 'Create Matrix from JSON'
+        id: set-matrix
+        run: echo "matrix=$(jq -c '.' issues.json)" >> $GITHUB_OUTPUT
+
+  # This job orchestrates the analysis for each issue from the matrix
+  analyze-issue:
+    runs-on: ubuntu-latest
+    needs: setup-matrix
+    strategy:
+      fail-fast: false
+      matrix:
+        issue: ${{ fromJson(needs.setup-matrix.outputs.matrix) }}
+
+    steps:
+      - name: 'Print Issue Details'
+        run: |
+          echo "Processing Issue #${{ matrix.issue.number }}"
+          echo "Base Hash: ${{ matrix.issue.base_hash }}"
+          echo "New Hash: ${{ matrix.issue.new_hash }}"
+
+      # STEP 1: Analyze the BASE hash (Version 1.0)
+      - name: 'Analyze Base Commit'
+        uses: ./.github/workflows/reusable-analysis.yml
+        with:
+          issue_number: ${{ matrix.issue.number }}
+          commit_hash: ${{ matrix.issue.base_hash }}
+          project_version: '1.0'
+        secrets:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_ORGANIZATION: ${{ vars.SONAR_ORGANIZATION }}
+
+      # STEP 2: Analyze the NEW hash (Version 2.0)
+      - name: 'Analyze New Commit'
+        uses: ./.github/workflows/reusable-analysis.yml
+        with:
+          issue_number: ${{ matrix.issue.number }}
+          commit_hash: ${{ matrix.issue.new_hash }}
+          project_version: '2.0'
+        secrets:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_ORGANIZATION: ${{ vars.SONAR_ORGANIZATION }}
+
+      # STEP 3: Wait for SonarCloud to process the report
+      - name: 'Wait for SonarCloud analysis to complete'
+        run: sleep 60 # Give SonarCloud time to process the background task. Adjust if needed.
+
+      # STEP 4: Get commit date of base hash for accurate "fixed issues" query
+      - name: 'Get Base Commit Date'
+        id: commit-date
+        run: |
+          # Checkout the repo to access git history
+          git clone ${{ github.server_url }}/${{ github.repository }} .
+          # Get the commit date in ISO 8601 format required by SonarCloud API
+          date=$(git log -1 --format=%aI ${{ matrix.issue.base_hash }})
+          echo "base_commit_date=$date" >> $GITHUB_OUTPUT
+
+      # STEP 5: Call the API to get the comparison reports
+      - name: 'Extract New and Fixed Issues via API'
+        run: |
+          # Query for NEW issues introduced since the leak period (v1.0)
+          echo "Fetching new issues..."
+          curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
+            "https://sonarcloud.io/api/issues/search?componentKeys=maven-issue-${{ matrix.issue.number }}&sinceLeakPeriod=true&p=1&ps=500" \
+            -o new_issues_report_${{ matrix.issue.number }}.json
+
+          # Query for FIXED issues that were resolved after the base commit date
+          echo "Fetching fixed issues resolved after ${{ steps.commit-date.outputs.base_commit_date }}..."
+          curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
+            "https://sonarcloud.io/api/issues/search?componentKeys=maven-issue-${{ matrix.issue.number }}&statuses=RESOLVED,CLOSED&resolutions=FIXED&resolvedAfter=${{ steps.commit-date.outputs.base_commit_date }}&p=1&ps=500" \
+            -o fixed_issues_report_${{ matrix.issue.number }}.json
+
+          echo "API reports generated for Issue #${{ matrix.issue.number }}."
+
+      # STEP 6: Upload the reports as an artifact
+      - name: 'Upload Comparison Reports'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonarqube-report-issue-${{ matrix.issue.number }}
+          path: |
+            new_issues_report_${{ matrix.issue.number }}.json
+            fixed_issues_report_${{ matrix.issue.number }}.json
