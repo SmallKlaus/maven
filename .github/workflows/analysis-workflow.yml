@@ -1,0 +1,166 @@
+name: 'SonarCloud Historical Issue Analysis (Single File)'
+
+on:
+  workflow_dispatch:
+
+jobs:
+  # This job reads the JSON file and prepares the list of issues for the next job
+  setup-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: 'Checkout repository'
+        uses: actions/checkout@v4
+
+      - name: 'Install jq'
+        run: sudo apt-get install -y jq
+
+      - name: 'Create Matrix from JSON'
+        id: set-matrix
+        run: echo "matrix=$(jq -c '.' issues.json)" >> $GITHUB_OUTPUT
+
+  # This job orchestrates the analysis for each issue from the matrix
+  analyze-issue:
+    runs-on: ubuntu-latest
+    needs: setup-matrix
+    strategy:
+      fail-fast: false
+      matrix:
+        issue: ${{ fromJson(needs.setup-matrix.outputs.matrix) }}
+
+    steps:
+      - name: 'Print Issue Details'
+        run: |
+          echo "Processing Issue #${{ matrix.issue.number }}"
+          echo "Base Hash: ${{ matrix.issue.base_hash }}"
+          echo "New Hash: ${{ matrix.issue.new_hash }}"
+
+      # --- START: BASE HASH ANALYSIS (Version 1.0) ---
+      - name: 'Checkout Base Commit'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.issue.base_hash }}
+          fetch-depth: 0
+          clean: true
+
+      - name: 'Set up JDK 17 for Base'
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven'
+      
+      - name: 'Get Base Commit Date'
+        id: commit-info-base
+        run: echo "date=$(git log -1 --format=%as)" >> $GITHUB_OUTPUT
+
+      - name: 'Base: Attempt initial build (with tests)'
+        id: initial-build-base
+        continue-on-error: true
+        run: mvn -B clean verify
+
+      - name: 'Base: Retry build 1 (skipping tests)'
+        id: retry-build-1-base
+        if: steps.initial-build-base.outcome == 'failure'
+        continue-on-error: true
+        run: |
+          echo "Initial build failed for base. Retrying in safe mode..."
+          mvn -B clean compile -DskipTests
+
+      - name: 'Base: Retry build 2 (simple compile)'
+        id: retry-build-2-base
+        if: steps.retry-build-1-base.outcome == 'failure'
+        continue-on-error: true
+        run: |
+          echo "Second build attempt failed for base. Retrying with simple compile..."
+          mvn -B clean compile
+
+      - name: 'Run SonarCloud Scan on Base (if build succeeded)'
+        if: steps.initial-build-base.outcome == 'success' || steps.retry-build-1-base.outcome == 'success' || steps.retry-build-2-base.outcome == 'success'
+        run: |
+          mvn -B verify sonar:sonar \
+            -Dsonar.projectKey=maven-issue-${{ matrix.issue.number }} \
+            -Dsonar.projectName="Maven Issue #${{ matrix.issue.number }}" \
+            -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }} \
+            -Dsonar.projectVersion=1.0 \
+            -Dsonar.login=${{ secrets.SONAR_TOKEN }} \
+            -Dsonar.projectDate=${{ steps.commit-info-base.outputs.date }}
+
+      # --- START: NEW HASH ANALYSIS (Version 2.0) ---
+      - name: 'Checkout New Commit'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.issue.new_hash }}
+          fetch-depth: 0
+          clean: true
+
+      - name: 'Set up JDK 17 for New'
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: 'Get New Commit Date'
+        id: commit-info-new
+        run: echo "date=$(git log -1 --format=%as)" >> $GITHUB_OUTPUT
+
+      - name: 'New: Attempt initial build (with tests)'
+        id: initial-build-new
+        continue-on-error: true
+        run: mvn -B clean verify
+
+      - name: 'New: Retry build 1 (skipping tests)'
+        id: retry-build-1-new
+        if: steps.initial-build-new.outcome == 'failure'
+        continue-on-error: true
+        run: |
+          echo "Initial build failed for new. Retrying in safe mode..."
+          mvn -B clean compile -DskipTests
+
+      - name: 'New: Retry build 2 (simple compile)'
+        id: retry-build-2-new
+        if: steps.retry-build-1-new.outcome == 'failure'
+        continue-on-error: true
+        run: |
+          echo "Second build attempt failed for new. Retrying with simple compile..."
+          mvn -B clean compile
+
+      - name: 'Run SonarCloud Scan on New (if build succeeded)'
+        if: steps.initial-build-new.outcome == 'success' || steps.retry-build-1-new.outcome == 'success' || steps.retry-build-2-new.outcome == 'success'
+        run: |
+          mvn -B verify sonar:sonar \
+            -Dsonar.projectKey=maven-issue-${{ matrix.issue.number }} \
+            -Dsonar.projectName="Maven Issue #${{ matrix.issue.number }}" \
+            -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }} \
+            -Dsonar.projectVersion=2.0 \
+            -Dsonar.login=${{ secrets.SONAR_TOKEN }} \
+            -Dsonar.projectDate=${{ steps.commit-info-new.outputs.date }} \
+            -Dsonar.newCode.referenceBranch=1.0
+
+      # --- START: API EXTRACTION AND REPORTING ---
+      - name: 'Wait for SonarCloud analysis to complete'
+        run: sleep 60
+
+      - name: 'Extract New and Fixed Issues via API'
+        run: |
+          echo "Fetching new issues..."
+          curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
+            "https://sonarcloud.io/api/issues/search?componentKeys=maven-issue-${{ matrix.issue.number }}&sinceLeakPeriod=true&p=1&ps=500" \
+            -o new_issues_report_${{ matrix.issue.number }}.json
+
+          echo "Fetching fixed issues resolved after ${{ steps.commit-info-base.outputs.date }}..."
+          curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
+            "https://sonarcloud.io/api/issues/search?componentKeys=maven-issue-${{ matrix.issue.number }}&statuses=RESOLVED,CLOSED&resolutions=FIXED&resolvedAfter=${{ steps.commit-info-base.outputs.date }}T00:00:00Z&p=1&ps=500" \
+            -o fixed_issues_report_${{ matrix.issue.number }}.json
+
+          echo "API reports generated for Issue #${{ matrix.issue.number }}."
+
+      - name: 'Upload Comparison Reports'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonarqube-report-issue-${{ matrix.issue.number }}
+          path: |
+            new_issues_report_${{ matrix.issue.number }}.json
+            fixed_issues_report_${{ matrix.issue.number }}.json
