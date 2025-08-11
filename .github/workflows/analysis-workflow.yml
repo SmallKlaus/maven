@@ -18,7 +18,7 @@ jobs:
 
       - name: 'Create Matrix from JSON'
         id: set-matrix
-        run: echo "matrix=$(jq -c '.' issues.json)" >> $GITHUB_OUTPUT
+        run: echo "matrix=$(jq -c '.' enriched-maven-issues.json)" >> $GITHUB_OUTPUT
 
   # This job orchestrates the analysis for each issue from the matrix
   analyze-issue:
