@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
 
 jobs:
-  # This job reads the JSON file and prepares the list of issues for the next job
+  # This job reads the JSON file and prepares it for the next job as an artifact
   setup-matrix:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      matrix_present: ${{ steps.check_file.outputs.exists }}
     steps:
       - name: 'Checkout repository'
         uses: actions/checkout@v4
@@ -16,20 +16,50 @@ jobs:
       - name: 'Install jq'
         run: sudo apt-get install -y jq
 
-      - name: 'Create Matrix from JSON'
-        id: set-matrix
-        run: echo "matrix=$(jq -c '.' enriched-maven-issues.json)" >> $GITHUB_OUTPUT
+      - name: 'Check if issues.json exists'
+        id: check_file
+        run: |
+          if [ -f "issues.json" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 'Create Matrix File from JSON'
+        if: steps.check_file.outputs.exists == 'true'
+        run: |
+          # Create a JSON file that the next job's matrix strategy can read
+          jq -c '.' issues.json > matrix.json
+
+      - name: 'Upload Matrix as Artifact'
+        if: steps.check_file.outputs.exists == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: matrix-artifact
+          path: matrix.json
 
   # This job orchestrates the analysis for each issue from the matrix
   analyze-issue:
     runs-on: ubuntu-latest
     needs: setup-matrix
+    # Only run this job if the matrix artifact was created
+    if: needs.setup-matrix.outputs.matrix_present == 'true'
     strategy:
       fail-fast: false
+      # Read the matrix from the JSON file downloaded via artifact
       matrix:
         issue: ${{ fromJson(needs.setup-matrix.outputs.matrix) }}
 
     steps:
+      - name: 'Download Matrix Artifact'
+        uses: actions/download-artifact@v4
+        with:
+          name: matrix-artifact
+
+      - name: 'Load Matrix'
+        id: load-matrix
+        run: echo "matrix_data=$(cat matrix.json)" >> $GITHUB_OUTPUT
+
       - name: 'Print Issue Details'
         run: |
           echo "Processing Issue #${{ matrix.issue.number }}"
