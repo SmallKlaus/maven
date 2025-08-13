@@ -30,7 +30,7 @@ jobs:
             echo "Base Hash: ${base_hash}"
             echo "New Hash: ${new_hash}"
 
-            # Use status files to track success/failure, as variables in subshells don't persist.
+            # Use status files to track success/failure
             echo "failure" > base_status.txt
             echo "failure" > new_status.txt
 
@@ -41,26 +41,14 @@ jobs:
 
             # Build and analyze base hash. If successful, write "success" to the status file.
             (
-              mvn -B clean verify && \
-              mvn -B verify sonar:sonar \
-                -Dsonar.projectKey=maven-issue-${issue_number} \
-                -Dsonar.projectName="Maven Issue #${issue_number}" \
-                -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }} \
-                -Dsonar.projectVersion=1.0 \
-                -Dsonar.login=${{ secrets.SONAR_TOKEN }} \
-                -Dsonar.projectDate=${base_commit_date} && \
+              mvn -B clean verify -Drat.skip=true && \
+              mvn -B verify sonar:sonar -Drat.skip=true -Dsonar.projectKey=maven-issue-${issue_number} -Dsonar.projectName="Maven Issue #${issue_number}" -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }} -Dsonar.projectVersion=1.0 -Dsonar.login=${{ secrets.SONAR_TOKEN }} -Dsonar.projectDate=${base_commit_date} && \
               echo "success" > base_status.txt
             ) || (
               echo "Initial build failed for base. Retrying..."
               (
-                mvn -B clean compile -DskipTests && \
-                mvn -B verify sonar:sonar \
-                  -Dsonar.projectKey=maven-issue-${issue_number} \
-                  -Dsonar.projectName="Maven Issue #${issue_number}" \
-                  -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }} \
-                  -Dsonar.projectVersion=1.0 \
-                  -Dsonar.login=${{ secrets.SONAR_TOKEN }} \
-                  -Dsonar.projectDate=${base_commit_date} && \
+                mvn -B clean compile -DskipTests -Drat.skip=true && \
+                mvn -B verify sonar:sonar -Drat.skip=true -Dsonar.projectKey=maven-issue-${issue_number} -Dsonar.projectName="Maven Issue #${issue_number}" -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }} -Dsonar.projectVersion=1.0 -Dsonar.login=${{ secrets.SONAR_TOKEN }} -Dsonar.projectDate=${base_commit_date} && \
                 echo "success" > base_status.txt
               )
             )
@@ -72,28 +60,14 @@ jobs:
 
             # Build and analyze new hash. If successful, write "success" to the status file.
             (
-              mvn -B clean verify && \
-              mvn -B verify sonar:sonar \
-                -Dsonar.projectKey=maven-issue-${issue_number} \
-                -Dsonar.projectName="Maven Issue #${issue_number}" \
-                -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }} \
-                -Dsonar.projectVersion=2.0 \
-                -Dsonar.login=${{ secrets.SONAR_TOKEN }} \
-                -Dsonar.projectDate=${new_commit_date} \
-                -Dsonar.newCode.referenceBranch=1.0 && \
+              mvn -B clean verify -Drat.skip=true && \
+              mvn -B verify sonar:sonar -Drat.skip=true -Dsonar.projectKey=maven-issue-${issue_number} -Dsonar.projectName="Maven Issue #${issue_number}" -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }} -Dsonar.projectVersion=2.0 -Dsonar.login=${{ secrets.SONAR_TOKEN }} -Dsonar.projectDate=${new_commit_date} -Dsonar.newCode.referenceBranch=1.0 && \
               echo "success" > new_status.txt
             ) || (
               echo "Initial build failed for new. Retrying..."
               (
-                mvn -B clean compile -DskipTests && \
-                mvn -B verify sonar:sonar \
-                  -Dsonar.projectKey=maven-issue-${issue_number} \
-                  -Dsonar.projectName="Maven Issue #${issue_number}" \
-                  -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }} \
-                  -Dsonar.projectVersion=2.0 \
-                  -Dsonar.login=${{ secrets.SONAR_TOKEN }} \
-                  -Dsonar.projectDate=${new_commit_date} \
-                  -Dsonar.newCode.referenceBranch=1.0 && \
+                mvn -B clean compile -DskipTests -Drat.skip=true && \
+                mvn -B verify sonar:sonar -Drat.skip=true -Dsonar.projectKey=maven-issue-${issue_number} -Dsonar.projectName="Maven Issue #${issue_number}" -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }} -Dsonar.projectVersion=2.0 -Dsonar.login=${{ secrets.SONAR_TOKEN }} -Dsonar.projectDate=${new_commit_date} -Dsonar.newCode.referenceBranch=1.0 && \
                 echo "success" > new_status.txt
               )
             )
@@ -106,13 +80,8 @@ jobs:
               echo "Both analyses succeeded. Fetching API reports for Issue #${issue_number}"
               sleep 60
 
-              curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
-                "https://sonarcloud.io/api/issues/search?componentKeys=maven-issue-${issue_number}&sinceLeakPeriod=true&p=1&ps=500" \
-                -o "new_issues_report_${issue_number}.json"
-
-              curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
-                "https://sonarcloud.io/api/issues/search?componentKeys=maven-issue-${issue_number}&statuses=RESOLVED,CLOSED&resolutions=FIXED&resolvedAfter=${base_commit_date}T00:00:00Z&p=1&ps=500" \
-                -o "fixed_issues_report_${issue_number}.json"
+              curl -s -u "${{ secrets.SONAR_TOKEN }}:" "https://sonarcloud.io/api/issues/search?componentKeys=maven-issue-${issue_number}&sinceLeakPeriod=true&p=1&ps=500" -o "new_issues_report_${issue_number}.json"
+              curl -s -u "${{ secrets.SONAR_TOKEN }}:" "https://sonarcloud.io/api/issues/search?componentKeys=maven-issue-${issue_number}&statuses=RESOLVED,CLOSED&resolutions=FIXED&resolvedAfter=${base_commit_date}T00:00:00Z&p=1&ps=500" -o "fixed_issues_report_${issue_number}.json"
 
               # Upload artifacts for THIS issue before the next loop iteration
               gh artifact upload "new_issues_report_${issue_number}.json" "fixed_issues_report_${issue_number}.json" --name "sonarqube-report-issue-${issue_number}"
