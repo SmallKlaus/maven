@@ -16,6 +16,15 @@ jobs:
       - name: 'Install jq'
         run: sudo apt-get install -y jq
 
+      - name: 'Debug: Check issues.json file'
+        run: |
+          if [ ! -f "issues.json" ]; then
+            echo "::error::issues.json file not found!"
+            exit 1
+          fi
+          echo "issues.json found. First 10 lines:"
+          head -n 10 issues.json
+
       - name: 'Split JSON into chunks'
         id: create-matrix
         run: |
@@ -26,12 +35,19 @@ jobs:
           i=0; while read -r chunk; do
             printf -v filename "chunks/part-%02d.json" "$i"
             echo "$chunk" > "$filename"
+            echo "Created chunk file: $filename"
             i=$((i+1))
           done
           
+          # Check if any chunk files were created. If not, fail with an error.
+          if [ ! "$(ls -A chunks)" ]; then
+            echo "::error::No chunk files were created. issues.json might be empty or invalid."
+            exit 1
+          fi
+
           # Create a JSON array of the chunk filenames for the matrix strategy.
-          # This output is small and will not exceed the 1MB limit.
           matrix_json=$(ls chunks | jq -R . | jq -s .)
+          echo "Generated matrix for next job: $matrix_json"
           echo "matrix=${matrix_json}" >> $GITHUB_OUTPUT
 
       - name: 'Upload chunks artifact'
