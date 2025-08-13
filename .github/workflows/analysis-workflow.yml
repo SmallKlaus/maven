@@ -79,112 +79,125 @@ jobs:
         chunk_file: ${{ fromJson(needs.setup-chunks.outputs.matrix) }}
 
     steps:
-      - name: 'Checkout repository'
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # Fetch all history for git checkouts
-
       - name: 'Download issue chunks'
         uses: actions/download-artifact@v4
         with:
           name: issue-chunks
           path: chunks
 
+      - name: 'Create directory for reports'
+        run: mkdir -p chunk-reports
+
       - name: 'Process each issue in a loop'
         run: |
           # The loop now reads from the specific chunk file assigned to this parallel job.
           jq -c '.[]' chunks/${{ matrix.chunk_file }} | while read issue; do
+            # FIX: Skip empty lines to prevent jq parse errors
+            if [ -z "$issue" ]; then
+              continue
+            fi
+
             # Extract details for the current issue using jq
             issue_number=$(echo "$issue" | jq -r '.number')
             base_hash=$(echo "$issue" | jq -r '.base_hash')
             new_hash=$(echo "$issue" | jq -r '.new_hash')
+            
+            # Create a dedicated, isolated directory for this issue's analysis
+            work_dir="work/${issue_number}"
+            mkdir -p "${work_dir}"
 
-            echo "--- [${{ matrix.chunk_file }}] Processing Issue #${issue_number} ---"
-            echo "Base Hash: ${base_hash}"
-            echo "New Hash: ${new_hash}"
+            echo "--- [${{ matrix.chunk_file }}] Processing Issue #${issue_number} in ${work_dir} ---"
+            
+            # Clone a fresh copy of the repo into the isolated directory
+            echo "Cloning repository..."
+            git clone "https://github.com/${{ github.repository }}.git" "${work_dir}"
+            cd "${work_dir}"
 
             # Use status files to track success/failure
-            echo "failure" > base_status.txt
-            echo "failure" > new_status.txt
+            echo "failure" > ../../base_status.txt
+            echo "failure" > ../../new_status.txt
+            
+            base_commit_date=""
 
             # --- START: BASE HASH ANALYSIS (Version 1.0) ---
-            echo "Analyzing Base Commit: ${base_hash}"
-            git checkout -f "$base_hash"
-            base_commit_date=$(git log -1 --format=%as)
-            
-            # --- Build Step (Base) ---
-            build_succeeded=false
-            if mvn -B install -DskipTests -Drat.skip=true; then
-              build_succeeded=true
-            else
-              echo "Initial build failed for base. Retrying with compile..."
-              if mvn -B compile -Drat.skip=true; then
-                build_succeeded=true
+            if git cat-file -e "$base_hash" 2>/dev/null; then
+              echo "Analyzing Base Commit: ${base_hash}"
+              git checkout -f "$base_hash"
+              base_commit_date=$(git log -1 --format=%as)
+              
+              build_succeeded=false
+              if mvn -B install -DskipTests -Drat.skip=true; then build_succeeded=true; fi
+              if [ "$build_succeeded" = false ]; then
+                echo "Initial build failed for base. Retrying with compile..."
+                if mvn -B compile -Drat.skip=true; then build_succeeded=true; fi
               fi
-            fi
 
-            # --- Analysis Step (Base) ---
-            if [ "$build_succeeded" = true ]; then
-              echo "Build succeeded for base. Running Sonar analysis..."
-              if mvn -B sonar:sonar -Drat.skip=true -Dsonar.host.url=https://sonarcloud.io -Dsonar.projectKey=maven-issue-${issue_number} -Dsonar.projectName="Maven Issue #${issue_number}" -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }} -Dsonar.projectVersion=1.0 -Dsonar.login=${{ secrets.SONAR_TOKEN }} -Dsonar.projectDate=${base_commit_date}; then
-                echo "success" > base_status.txt
+              if [ "$build_succeeded" = true ]; then
+                echo "Build succeeded for base. Running Sonar analysis..."
+                if mvn -B sonar:sonar -Drat.skip=true -Dsonar.host.url=https://sonarcloud.io -Dsonar.projectKey=maven-issue-${issue_number} -Dsonar.projectName="Maven Issue #${issue_number}" -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }} -Dsonar.projectVersion=1.0 -Dsonar.login=${{ secrets.SONAR_TOKEN }} -Dsonar.projectDate=${base_commit_date}; then
+                  echo "success" > ../../base_status.txt
+                fi
+              else
+                echo "::error::All build attempts failed for base hash ${base_hash}."
               fi
             else
-              echo "::error::All build attempts failed for base hash ${base_hash}."
+              echo "::warning::Base commit ${base_hash} not found. Skipping."
             fi
 
             # --- START: NEW HASH ANALYSIS (Version 2.0) ---
-            echo "Analyzing New Commit: ${new_hash}"
-            git checkout -f "$new_hash"
-            new_commit_date=$(git log -1 --format=%as)
+            if git cat-file -e "$new_hash" 2>/dev/null; then
+              echo "Analyzing New Commit: ${new_hash}"
+              git checkout -f "$new_hash"
+              new_commit_date=$(git log -1 --format=%as)
 
-            # --- Build Step (New) ---
-            build_succeeded=false
-            if mvn -B install -DskipTests -Drat.skip=true; then
-              build_succeeded=true
-            else
-              echo "Initial build failed for new. Retrying with compile..."
-              if mvn -B compile -Drat.skip=true; then
-                build_succeeded=true
+              build_succeeded=false
+              if mvn -B install -DskipTests -Drat.skip=true; then build_succeeded=true; fi
+              if [ "$build_succeeded" = false ]; then
+                echo "Initial build failed for new. Retrying with compile..."
+                if mvn -B compile -Drat.skip=true; then build_succeeded=true; fi
               fi
-            fi
 
-            # --- Analysis Step (New) ---
-            if [ "$build_succeeded" = true ]; then
-              echo "Build succeeded for new. Running Sonar analysis..."
-              if mvn -B sonar:sonar -Drat.skip=true -Dsonar.host.url=https://sonarcloud.io -Dsonar.projectKey=maven-issue-${issue_number} -Dsonar.projectName="Maven Issue #${issue_number}" -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }} -Dsonar.projectVersion=2.0 -Dsonar.login=${{ secrets.SONAR_TOKEN }} -Dsonar.projectDate=${new_commit_date} -Dsonar.newCode.referenceBranch=1.0; then
-                echo "success" > new_status.txt
+              if [ "$build_succeeded" = true ]; then
+                echo "Build succeeded for new. Running Sonar analysis..."
+                if mvn -B sonar:sonar -Drat.skip=true -Dsonar.host.url=https://sonarcloud.io -Dsonar.projectKey=maven-issue-${issue_number} -Dsonar.projectName="Maven Issue #${issue_number}" -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }} -Dsonar.projectVersion=2.0 -Dsonar.login=${{ secrets.SONAR_TOKEN }} -Dsonar.projectDate=${new_commit_date} -Dsonar.newCode.referenceBranch=1.0; then
+                  echo "success" > ../../new_status.txt
+                fi
+              else
+                echo "::error::All build attempts failed for new hash ${new_hash}."
               fi
             else
-              echo "::error::All build attempts failed for new hash ${new_hash}."
+              echo "::warning::New commit ${new_hash} not found. Skipping."
             fi
 
             # --- START: API EXTRACTION AND REPORTING (Conditional) ---
-            base_analysis_status=$(cat base_status.txt)
-            new_analysis_status=$(cat new_status.txt)
+            base_analysis_status=$(cat ../../base_status.txt)
+            new_analysis_status=$(cat ../../new_status.txt)
 
             if [ "$base_analysis_status" = "success" ] && [ "$new_analysis_status" = "success" ]; then
               echo "Both analyses succeeded. Fetching API reports for Issue #${issue_number}"
               sleep 60
 
-              curl -s -u "${{ secrets.SONAR_TOKEN }}:" "https://sonarcloud.io/api/issues/search?componentKeys=maven-issue-${issue_number}&sinceLeakPeriod=true&p=1&ps=500" -o "new_issues_report_${issue_number}.json"
-              curl -s -u "${{ secrets.SONAR_TOKEN }}:" "https://sonarcloud.io/api/issues/search?componentKeys=maven-issue-${issue_number}&statuses=RESOLVED,CLOSED&resolutions=FIXED&resolvedAfter=${base_commit_date}T00:00:00Z&p=1&ps=500" -o "fixed_issues_report_${issue_number}.json"
-
-              # Upload artifacts for THIS issue before the next loop iteration
-              gh artifact upload "new_issues_report_${issue_number}.json" "fixed_issues_report_${issue_number}.json" --name "sonarqube-report-issue-${issue_number}"
+              # Get new issues with detailed fields
+              curl -s -u "${{ secrets.SONAR_TOKEN }}:" "https://sonarcloud.io/api/issues/search?componentKeys=maven-issue-${issue_number}&sinceLeakPeriod=true&p=1&ps=500&f=key,rule,severity,type,component,line,message,effort,tags,creationDate,updateDate" -o "../../chunk-reports/new_issues_report_${issue_number}.json"
+              
+              # Get fixed issues with detailed fields
+              curl -s -u "${{ secrets.SONAR_TOKEN }}:" "https://sonarcloud.io/api/issues/search?componentKeys=maven-issue-${issue_number}&statuses=RESOLVED,CLOSED&resolutions=FIXED&resolvedAfter=${base_commit_date}T00:00:00Z&p=1&ps=500&f=key,rule,severity,type,component,line,message,effort,tags,creationDate,updateDate,resolution" -o "../../chunk-reports/fixed_issues_report_${issue_number}.json"
             else
               echo "::warning::Skipping API extraction for Issue #${issue_number} due to analysis failure."
               echo "Base analysis status: ${base_analysis_status}"
               echo "New analysis status: ${new_analysis_status}"
             fi
             
-            # Clean up status files for the next iteration
-            rm -f base_status.txt new_status.txt
-
+            # Go back to the root of the runner's workspace
+            cd ../..
+            # Clean up the isolated directory and status files
+            rm -rf "${work_dir}" base_status.txt new_status.txt
+            
             echo "--- Finished processing Issue #${issue_number} ---"
-            # Return to the original state to ensure clean checkout for the next iteration
-            git checkout main # Or your default branch
           done
-        env:
-          # The GITHUB_TOKEN is required for the 'gh' CLI to upload artifacts
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 'Upload Reports Artifact for this Chunk'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonarqube-reports-chunk-${{ matrix.chunk_file }}
+          path: chunk-reports/
