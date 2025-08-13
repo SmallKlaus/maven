@@ -57,8 +57,8 @@ jobs:
             exit 1
           fi
 
-          # Create a JSON array of the chunk filenames for the matrix strategy.
-          matrix_json=$(ls chunks | jq -R . | jq -s .)
+          # Create a compact, single-line JSON array of the chunk filenames for the matrix strategy.
+          matrix_json=$(ls chunks | jq -R . | jq -s -c .)
           echo "Generated matrix for next job: $matrix_json"
           echo "matrix=${matrix_json}" >> $GITHUB_OUTPUT
 
