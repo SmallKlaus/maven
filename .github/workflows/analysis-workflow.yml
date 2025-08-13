@@ -1,32 +1,77 @@
-name: 'SonarCloud Historical Issue Analysis (Single File)'
+name: 'SonarCloud Historical Issue Analysis (Parallel)'
 
 on:
   workflow_dispatch:
 
 jobs:
-  analyze-issues-sequentially:
+  # Job 1: Splits the large issues.json file into smaller, manageable chunks.
+  setup-chunks:
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.create-matrix.outputs.matrix }}
+    steps:
+      - name: 'Checkout repository'
+        uses: actions/checkout@v4
+
+      - name: 'Install jq'
+        run: sudo apt-get install -y jq
+
+      - name: 'Split JSON into chunks'
+        id: create-matrix
+        run: |
+          mkdir -p chunks
+          # This command uses jq to group the issues into arrays of 5,
+          # then writes each group to a separate file (part-00.json, part-01.json, etc.).
+          jq -c '. | to_entries | group_by(.key / 5 | floor) | .[] | map(.value)' issues.json | \
+          i=0; while read -r chunk; do
+            printf -v filename "chunks/part-%02d.json" "$i"
+            echo "$chunk" > "$filename"
+            i=$((i+1))
+          done
+          
+          # Create a JSON array of the chunk filenames for the matrix strategy.
+          # This output is small and will not exceed the 1MB limit.
+          matrix_json=$(ls chunks | jq -R . | jq -s .)
+          echo "matrix=${matrix_json}" >> $GITHUB_OUTPUT
+
+      - name: 'Upload chunks artifact'
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-chunks
+          path: chunks/
+
+  # Job 2: Runs in parallel for each chunk file created above.
+  analyze-chunk:
+    runs-on: ubuntu-latest
+    needs: setup-chunks
+    strategy:
+      fail-fast: false
+      matrix:
+        # The matrix is dynamically created from the list of chunk filenames.
+        chunk_file: ${{ fromJson(needs.setup-chunks.outputs.matrix) }}
+
     steps:
       - name: 'Checkout repository'
         uses: actions/checkout@v4
         with:
           fetch-depth: 0 # Fetch all history for git checkouts
 
-      - name: 'Install jq'
-        run: sudo apt-get install -y jq
+      - name: 'Download issue chunks'
+        uses: actions/download-artifact@v4
+        with:
+          name: issue-chunks
+          path: chunks
 
       - name: 'Process each issue in a loop'
         run: |
-          # This command reads the issues.json file and creates a loop that iterates
-          # over each JSON object in the array. The 'c' flag compacts each object
-          # onto a single line, which is perfect for a 'while read' loop.
-          jq -c '.[]' issues.json | while read issue; do
+          # The loop now reads from the specific chunk file assigned to this parallel job.
+          jq -c '.[]' chunks/${{ matrix.chunk_file }} | while read issue; do
             # Extract details for the current issue using jq
             issue_number=$(echo "$issue" | jq -r '.number')
             base_hash=$(echo "$issue" | jq -r '.base_hash')
             new_hash=$(echo "$issue" | jq -r '.new_hash')
 
-            echo "--- Processing Issue #${issue_number} ---"
+            echo "--- [${{ matrix.chunk_file }}] Processing Issue #${issue_number} ---"
             echo "Base Hash: ${base_hash}"
             echo "New Hash: ${new_hash}"
 
@@ -38,39 +83,53 @@ jobs:
             echo "Analyzing Base Commit: ${base_hash}"
             git checkout -f "$base_hash"
             base_commit_date=$(git log -1 --format=%as)
+            
+            # --- Build Step (Base) ---
+            build_succeeded=false
+            if mvn -B install -DskipTests -Drat.skip=true; then
+              build_succeeded=true
+            else
+              echo "Initial build failed for base. Retrying with compile..."
+              if mvn -B compile -Drat.skip=true; then
+                build_succeeded=true
+              fi
+            fi
 
-            # Build and analyze base hash. If successful, write "success" to the status file.
-            (
-              mvn -B clean verify -Drat.skip=true && \
-              mvn -B verify sonar:sonar -Drat.skip=true -Dsonar.projectKey=maven-issue-${issue_number} -Dsonar.projectName="Maven Issue #${issue_number}" -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }} -Dsonar.projectVersion=1.0 -Dsonar.login=${{ secrets.SONAR_TOKEN }} -Dsonar.projectDate=${base_commit_date} && \
-              echo "success" > base_status.txt
-            ) || (
-              echo "Initial build failed for base. Retrying..."
-              (
-                mvn -B clean compile -DskipTests -Drat.skip=true && \
-                mvn -B verify sonar:sonar -Drat.skip=true -Dsonar.projectKey=maven-issue-${issue_number} -Dsonar.projectName="Maven Issue #${issue_number}" -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }} -Dsonar.projectVersion=1.0 -Dsonar.login=${{ secrets.SONAR_TOKEN }} -Dsonar.projectDate=${base_commit_date} && \
+            # --- Analysis Step (Base) ---
+            if [ "$build_succeeded" = true ]; then
+              echo "Build succeeded for base. Running Sonar analysis..."
+              if mvn -B sonar:sonar -Drat.skip=true -Dsonar.host.url=https://sonarcloud.io -Dsonar.projectKey=maven-issue-${issue_number} -Dsonar.projectName="Maven Issue #${issue_number}" -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }} -Dsonar.projectVersion=1.0 -Dsonar.login=${{ secrets.SONAR_TOKEN }} -Dsonar.projectDate=${base_commit_date}; then
                 echo "success" > base_status.txt
-              )
-            )
+              fi
+            else
+              echo "::error::All build attempts failed for base hash ${base_hash}."
+            fi
 
             # --- START: NEW HASH ANALYSIS (Version 2.0) ---
             echo "Analyzing New Commit: ${new_hash}"
             git checkout -f "$new_hash"
             new_commit_date=$(git log -1 --format=%as)
 
-            # Build and analyze new hash. If successful, write "success" to the status file.
-            (
-              mvn -B clean verify -Drat.skip=true && \
-              mvn -B verify sonar:sonar -Drat.skip=true -Dsonar.projectKey=maven-issue-${issue_number} -Dsonar.projectName="Maven Issue #${issue_number}" -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }} -Dsonar.projectVersion=2.0 -Dsonar.login=${{ secrets.SONAR_TOKEN }} -Dsonar.projectDate=${new_commit_date} -Dsonar.newCode.referenceBranch=1.0 && \
-              echo "success" > new_status.txt
-            ) || (
-              echo "Initial build failed for new. Retrying..."
-              (
-                mvn -B clean compile -DskipTests -Drat.skip=true && \
-                mvn -B verify sonar:sonar -Drat.skip=true -Dsonar.projectKey=maven-issue-${issue_number} -Dsonar.projectName="Maven Issue #${issue_number}" -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }} -Dsonar.projectVersion=2.0 -Dsonar.login=${{ secrets.SONAR_TOKEN }} -Dsonar.projectDate=${new_commit_date} -Dsonar.newCode.referenceBranch=1.0 && \
+            # --- Build Step (New) ---
+            build_succeeded=false
+            if mvn -B install -DskipTests -Drat.skip=true; then
+              build_succeeded=true
+            else
+              echo "Initial build failed for new. Retrying with compile..."
+              if mvn -B compile -Drat.skip=true; then
+                build_succeeded=true
+              fi
+            fi
+
+            # --- Analysis Step (New) ---
+            if [ "$build_succeeded" = true ]; then
+              echo "Build succeeded for new. Running Sonar analysis..."
+              if mvn -B sonar:sonar -Drat.skip=true -Dsonar.host.url=https://sonarcloud.io -Dsonar.projectKey=maven-issue-${issue_number} -Dsonar.projectName="Maven Issue #${issue_number}" -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }} -Dsonar.projectVersion=2.0 -Dsonar.login=${{ secrets.SONAR_TOKEN }} -Dsonar.projectDate=${new_commit_date} -Dsonar.newCode.referenceBranch=1.0; then
                 echo "success" > new_status.txt
-              )
-            )
+              fi
+            else
+              echo "::error::All build attempts failed for new hash ${new_hash}."
+            fi
 
             # --- START: API EXTRACTION AND REPORTING (Conditional) ---
             base_analysis_status=$(cat base_status.txt)
