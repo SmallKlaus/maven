@@ -29,15 +29,27 @@ jobs:
         id: create-matrix
         run: |
           mkdir -p chunks
-          # This command uses jq to group the issues into arrays of 5,
-          # then writes each group to a separate file (part-00.json, part-01.json, etc.).
-          jq -c '. | to_entries | group_by(.key / 5 | floor) | .[] | map(.value)' issues.json | \
-          i=0; while read -r chunk; do
+          # Step 1: Process the JSON and save the output to a temporary file, one chunk per line.
+          jq -c '. | to_entries | group_by(.key / 5 | floor) | .[] | map(.value)' issues.json > chunks.tmp
+
+          # Step 2: Debugging - check if the temporary file has content.
+          if [ ! -s chunks.tmp ]; then
+            echo "::error::jq processing resulted in an empty file. Check issues.json structure."
+            exit 1
+          fi
+          echo "Temporary chunk file created with $(wc -l < chunks.tmp) chunks."
+
+          # Step 3: Read the temporary file and create the final chunk files.
+          i=0
+          while read -r chunk; do
             printf -v filename "chunks/part-%02d.json" "$i"
             echo "$chunk" > "$filename"
             echo "Created chunk file: $filename"
             i=$((i+1))
-          done
+          done < chunks.tmp
+
+          # Clean up the temporary file
+          rm chunks.tmp
           
           # Check if any chunk files were created. If not, fail with an error.
           if [ ! "$(ls -A chunks)" ]; then
