@@ -88,12 +88,17 @@ jobs:
       - name: 'Create directory for reports'
         run: mkdir -p chunk-reports
 
+      # FIX: Create a single, complete mirror of the repository once per job.
+      - name: 'Create a local mirror of the repository'
+        run: git clone --mirror "https://github.com/${{ github.repository }}.git" repo.mirror
+
       - name: 'Process each issue in a loop'
         run: |
           # The loop now reads from the specific chunk file assigned to this parallel job.
           jq -c '.[]' chunks/${{ matrix.chunk_file }} | while read issue; do
-            # FIX: Skip empty lines to prevent jq parse errors
-            if [ -z "$issue" ]; then
+            # FIX: More robust check to skip empty or invalid lines
+            if [[ ! "$issue" =~ ^\{.*\}$ ]]; then
+              echo "Skipping invalid line in chunk file."
               continue
             fi
 
@@ -104,13 +109,12 @@ jobs:
             
             # Create a dedicated, isolated directory for this issue's analysis
             work_dir="work/${issue_number}"
-            mkdir -p "${work_dir}"
-
-            echo "--- [${{ matrix.chunk_file }}] Processing Issue #${issue_number} in ${work_dir} ---"
             
-            # Clone a fresh copy of the repo into the isolated directory
-            echo "Cloning repository..."
-            git clone "https://github.com/${{ github.repository }}.git" "${work_dir}"
+            echo "--- [${{ matrix.chunk_file }}] Processing Issue #${issue_number} ---"
+            
+            # FIX: Clone from the local mirror for speed and completeness.
+            echo "Cloning from local mirror into ${work_dir}..."
+            git clone ../repo.mirror "${work_dir}"
             cd "${work_dir}"
 
             # Use status files to track success/failure
@@ -120,7 +124,7 @@ jobs:
             base_commit_date=""
 
             # --- START: BASE HASH ANALYSIS (Version 1.0) ---
-            if git cat-file -e "$base_hash" 2>/dev/null; then
+            if git rev-parse --verify "$base_hash^{commit}" >/dev/null 2>&1; then
               echo "Analyzing Base Commit: ${base_hash}"
               git checkout -f "$base_hash"
               base_commit_date=$(git log -1 --format=%as)
@@ -141,11 +145,11 @@ jobs:
                 echo "::error::All build attempts failed for base hash ${base_hash}."
               fi
             else
-              echo "::warning::Base commit ${base_hash} not found. Skipping."
+              echo "::warning::Base commit ${base_hash} not found in repository mirror. Skipping."
             fi
 
             # --- START: NEW HASH ANALYSIS (Version 2.0) ---
-            if git cat-file -e "$new_hash" 2>/dev/null; then
+            if git rev-parse --verify "$new_hash^{commit}" >/dev/null 2>&1; then
               echo "Analyzing New Commit: ${new_hash}"
               git checkout -f "$new_hash"
               new_commit_date=$(git log -1 --format=%as)
@@ -166,7 +170,7 @@ jobs:
                 echo "::error::All build attempts failed for new hash ${new_hash}."
               fi
             else
-              echo "::warning::New commit ${new_hash} not found. Skipping."
+              echo "::warning::New commit ${new_hash} not found in repository mirror. Skipping."
             fi
 
             # --- START: API EXTRACTION AND REPORTING (Conditional) ---
