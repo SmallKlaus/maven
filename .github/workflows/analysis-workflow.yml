@@ -88,19 +88,18 @@ jobs:
       - name: 'Create directory for reports'
         run: mkdir -p chunk-reports
 
-      # FIX: Create a single, complete mirror of the repository once per job.
       - name: 'Create a local mirror of the repository'
         run: git clone --mirror "https://github.com/${{ github.repository }}.git" repo.mirror
 
       - name: 'Process each issue in a loop'
         run: |
-          # The loop now reads from the specific chunk file assigned to this parallel job.
-          jq -c '.[]' chunks/${{ matrix.chunk_file }} | while read issue; do
-            # FIX: More robust check to skip empty or invalid lines
-            if [[ ! "$issue" =~ ^\{.*\}$ ]]; then
-              echo "Skipping invalid line in chunk file."
-              continue
-            fi
+          chunk_file="chunks/${{ matrix.chunk_file }}"
+          # FIX: Use a more robust 'for' loop that iterates by index instead of 'while read'.
+          # This avoids potential parsing errors with complex lines.
+          issue_count=$(jq '. | length' "$chunk_file")
+          for (( i=0; i<$issue_count; i++ )); do
+            # Extract the i-th issue object from the chunk file
+            issue=$(jq -c ".[$i]" "$chunk_file")
 
             # Extract details for the current issue using jq
             issue_number=$(echo "$issue" | jq -r '.number')
@@ -110,9 +109,9 @@ jobs:
             # Create a dedicated, isolated directory for this issue's analysis
             work_dir="work/${issue_number}"
             
-            echo "--- [${{ matrix.chunk_file }}] Processing Issue #${issue_number} ---"
+            echo "--- [${{ matrix.chunk_file }}] Processing Issue #${issue_number} (Index $i) ---"
             
-            # FIX: Clone from the local mirror using the correct relative path.
+            # Clone from the local mirror for speed and completeness.
             echo "Cloning from local mirror into ${work_dir}..."
             git clone ./repo.mirror "${work_dir}"
             cd "${work_dir}"
