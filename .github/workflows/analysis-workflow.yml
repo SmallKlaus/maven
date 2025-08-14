@@ -112,9 +112,9 @@ jobs:
             
             echo "--- [${{ matrix.chunk_file }}] Processing Issue #${issue_number} ---"
             
-            # FIX: Clone from the local mirror for speed and completeness.
+            # FIX: Clone from the local mirror using the correct relative path.
             echo "Cloning from local mirror into ${work_dir}..."
-            git clone ../repo.mirror "${work_dir}"
+            git clone ./repo.mirror "${work_dir}"
             cd "${work_dir}"
 
             # Use status files to track success/failure
