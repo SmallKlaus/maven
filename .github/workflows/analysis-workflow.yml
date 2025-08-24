@@ -91,6 +91,21 @@ jobs:
       - name: 'Create a local mirror of the repository'
         run: git clone --mirror "https://github.com/${{ github.repository }}.git" repo.mirror
 
+      - name: 'Wait for filesystem to stabilize'
+        run: sleep 10 # Add a delay to ensure the mirror is fully ready before parallel access
+
+      - name: 'Verify local mirror readiness'
+        run: |
+          if [ ! -d "repo.mirror" ] || [ ! "$(ls -A repo.mirror)" ]; then
+            echo "::error::Local mirror directory 'repo.mirror' was not created or is empty."
+            exit 1
+          fi
+          if ! git -C ./repo.mirror rev-parse --is-bare-repository; then
+            echo "::error::'repo.mirror' is not a valid git repository."
+            exit 1
+          fi
+          echo "Local mirror verified successfully."
+
       - name: 'Process each issue in a loop'
         run: |
           chunk_file="chunks/${{ matrix.chunk_file }}"
@@ -110,9 +125,24 @@ jobs:
             
             echo "--- [${{ matrix.chunk_file }}] Processing Issue #${issue_number} (Index $i) ---"
             
-            # Clone from the local mirror for speed and completeness.
-            echo "Cloning from local mirror into ${work_dir}..."
-            git clone ./repo.mirror "${work_dir}"
+            # --- START: Resilient Cloning with Retries ---
+            clone_succeeded=false
+            for attempt in 1 2 3; do
+              echo "Attempt ${attempt}/3: Cloning from local mirror into ${work_dir}..."
+              if git clone ./repo.mirror "${work_dir}"; then
+                clone_succeeded=true
+                break
+              fi
+              echo "::warning::Clone attempt ${attempt} failed. Retrying in 5 seconds..."
+              sleep 5
+            done
+
+            if [ "$clone_succeeded" = false ]; then
+              echo "::error::All clone attempts failed for issue ${issue_number}. Skipping."
+              continue # Skip to the next issue in the loop
+            fi
+            # --- END: Resilient Cloning with Retries ---
+
             cd "${work_dir}"
 
             # Use status files to track success/failure
