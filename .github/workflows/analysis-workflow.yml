@@ -94,8 +94,7 @@ jobs:
       - name: 'Process each issue in a loop'
         run: |
           chunk_file="chunks/${{ matrix.chunk_file }}"
-          # FIX: Use a more robust 'for' loop that iterates by index instead of 'while read'.
-          # This avoids potential parsing errors with complex lines.
+          # Use a more robust 'for' loop that iterates by index instead of 'while read'.
           issue_count=$(jq '. | length' "$chunk_file")
           for (( i=0; i<$issue_count; i++ )); do
             # Extract the i-th issue object from the chunk file
@@ -180,11 +179,23 @@ jobs:
               echo "Both analyses succeeded. Fetching API reports for Issue #${issue_number}"
               sleep 60
 
-              # Get new issues with detailed fields
-              curl -s -u "${{ secrets.SONAR_TOKEN }}:" "https://sonarcloud.io/api/issues/search?componentKeys=maven-issue-${issue_number}&sinceLeakPeriod=true&p=1&ps=500&f=key,rule,severity,type,component,line,message,effort,tags,creationDate,updateDate" -o "../../chunk-reports/new_issues_report_${issue_number}.json"
+              # Get new issues and save report ONLY if issues are found
+              new_issues_response=$(curl -s -u "${{ secrets.SONAR_TOKEN }}:" "https://sonarcloud.io/api/issues/search?componentKeys=maven-issue-${issue_number}&sinceLeakPeriod=true&p=1&ps=500&f=key,rule,severity,type,component,line,message,effort,tags,creationDate,updateDate")
+              if [ $(echo "$new_issues_response" | jq '.issues | length') -gt 0 ]; then
+                echo "Found new issues. Saving report."
+                echo "$new_issues_response" > "../../chunk-reports/new_issues_report_${issue_number}.json"
+              else
+                echo "No new issues found."
+              fi
               
-              # Get fixed issues with detailed fields
-              curl -s -u "${{ secrets.SONAR_TOKEN }}:" "https://sonarcloud.io/api/issues/search?componentKeys=maven-issue-${issue_number}&statuses=RESOLVED,CLOSED&resolutions=FIXED&resolvedAfter=${base_commit_date}T00:00:00Z&p=1&ps=500&f=key,rule,severity,type,component,line,message,effort,tags,creationDate,updateDate,resolution" -o "../../chunk-reports/fixed_issues_report_${issue_number}.json"
+              # Get fixed issues and save report ONLY if issues are found
+              fixed_issues_response=$(curl -s -u "${{ secrets.SONAR_TOKEN }}:" "https://sonarcloud.io/api/issues/search?componentKeys=maven-issue-${issue_number}&statuses=RESOLVED,CLOSED&resolutions=FIXED&resolvedAfter=${base_commit_date}T00:00:00Z&p=1&ps=500&f=key,rule,severity,type,component,line,message,effort,tags,creationDate,updateDate,resolution")
+              if [ $(echo "$fixed_issues_response" | jq '.issues | length') -gt 0 ]; then
+                echo "Found fixed issues. Saving report."
+                echo "$fixed_issues_response" > "../../chunk-reports/fixed_issues_report_${issue_number}.json"
+              else
+                echo "No fixed issues found."
+              fi
             else
               echo "::warning::Skipping API extraction for Issue #${issue_number} due to analysis failure."
               echo "Base analysis status: ${base_analysis_status}"
@@ -204,3 +215,59 @@ jobs:
         with:
           name: sonarqube-reports-chunk-${{ matrix.chunk_file }}
           path: chunk-reports/
+
+  # Job 3: Gathers all reports from parallel jobs and packages them into two zip files.
+  package-reports:
+    runs-on: ubuntu-latest
+    # This job runs only after all the analyze-chunk jobs have completed.
+    needs: analyze-chunk
+    # 'if: always()' ensures this job runs even if some chunks failed, to collect partial results.
+    if: always()
+    steps:
+      - name: 'Download all chunk report artifacts'
+        uses: actions/download-artifact@v4
+        with:
+          # Use a pattern to download all artifacts starting with 'sonarqube-reports-chunk-'
+          pattern: sonarqube-reports-chunk-*
+          path: all-chunk-reports
+          merge-multiple: true # Merge all artifacts into one directory
+
+      - name: 'Prepare final report directories'
+        run: |
+          mkdir -p final-reports/new-issues
+          mkdir -p final-reports/fixed-issues
+
+      - name: 'Organize reports'
+        run: |
+          # Find all new issue reports and move them to the new-issues directory
+          find all-chunk-reports -name 'new_issues_report_*.json' -exec mv {} final-reports/new-issues/ \;
+          # Find all fixed issue reports and move them to the fixed-issues directory
+          find all-chunk-reports -name 'fixed_issues_report_*.json' -exec mv {} final-reports/fixed-issues/ \;
+
+      - name: 'Create zip archives'
+        run: |
+          # Only create the zip if the directory is not empty
+          if [ -n "$(ls -A final-reports/new-issues)" ]; then
+            cd final-reports/new-issues
+            zip -r ../../new-issues-reports.zip .
+            cd ../..
+          else
+            echo "No new issues reports found to zip."
+          fi
+          
+          if [ -n "$(ls -A final-reports/fixed-issues)" ]; then
+            cd final-reports/fixed-issues
+            zip -r ../../fixed-issues-reports.zip .
+            cd ../..
+          else
+            echo "No fixed issues reports found to zip."
+          fi
+
+      - name: 'Upload final zip archives'
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-sonar-reports
+          path: |
+            new-issues-reports.zip
+            fixed-issues-reports.zip
+          if-no-files-found: ignore # Don't fail if one of the zips doesn't exist
